@@ -30,6 +30,26 @@ export const createAuth = () => {
       },
     },
 
+    // Assign role securely during registration
+    databaseHooks: {
+      user: {
+        create: {
+          before: async (user, ctx) => {
+            const requestedRole = ctx?.body?.role;
+
+            const role = requestedRole === "owner" ? "owner" : "customer";
+
+            return {
+              data: {
+                ...user,
+                role,
+              },
+            };
+          },
+        },
+      },
+    },
+
     plugins: [
       jwt({
         jwt: {
