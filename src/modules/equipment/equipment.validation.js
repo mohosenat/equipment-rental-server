@@ -182,18 +182,28 @@ const validateFields = (data, isUpdate = false) => {
     }
   });
 
-  // Validate image URL
+  // Validate image URL or Base64 image
   if (data.image !== undefined) {
-    try {
-      const imageUrl = new URL(data.image);
-
-      if (!["http:", "https:"].includes(imageUrl.protocol)) {
-        throw new Error("Invalid protocol");
+    if (typeof data.image !== "string") {
+      errors.image = "Image must be a valid string.";
+    } else if (/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(data.image)) {
+      if (data.image.length > 15 * 1024 * 1024) {
+        errors.image = "Image size is too large.";
+      } else {
+        validatedData.image = data.image;
       }
+    } else {
+      try {
+        const imageUrl = new URL(data.image);
 
-      validatedData.image = imageUrl.href;
-    } catch {
-      errors.image = "Please provide a valid image URL.";
+        if (!["http:", "https:"].includes(imageUrl.protocol)) {
+          throw new Error("Invalid protocol");
+        }
+
+        validatedData.image = imageUrl.href;
+      } catch {
+        errors.image = "Please provide a valid image URL or Base64 image.";
+      }
     }
   }
 

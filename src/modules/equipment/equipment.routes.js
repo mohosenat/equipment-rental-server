@@ -7,12 +7,16 @@ import {
   getEquipmentByIdController,
   updateEquipmentController,
   deleteEquipmentController,
+  getMyEquipmentController,
 } from "./equipment.controller.js";
 
 const router = Router();
 
 // Get all approved equipment
 router.get("/", getAllEquipmentController);
+
+// Get all equipment belonging to the logged-in owner
+router.get("/my", verifyToken, verifyOwner, getMyEquipmentController);
 
 // Get single equipment by ID
 router.get("/:id", getEquipmentByIdController);

@@ -20,7 +20,7 @@ export const createEquipment = async (equipmentData) => {
   };
 };
 
-// Get all approved equipment with search, filtering and sorting
+// Get approved equipment with search, filtering, sorting and optional limit
 export const getAllEquipment = async (query = {}) => {
   const equipmentCollection = getDB().collection("equipment");
 
@@ -32,14 +32,13 @@ export const getAllEquipment = async (query = {}) => {
     maxPrice,
     availability,
     sort,
+    limit,
   } = query;
 
-  // Base query: only approved equipment
   const filter = {
     status: "approved",
   };
 
-  // Search by equipment name and location
   if (search) {
     filter.$or = [
       { name: { $regex: search, $options: "i" } },
@@ -47,17 +46,14 @@ export const getAllEquipment = async (query = {}) => {
     ];
   }
 
-  // Filter by category
   if (category) {
     filter.category = category;
   }
 
-  // Filter by rental type
   if (rentalType) {
     filter.rentalType = rentalType;
   }
 
-  // Filter by price range
   if (minPrice !== undefined || maxPrice !== undefined) {
     filter.price = {};
 
@@ -70,14 +66,12 @@ export const getAllEquipment = async (query = {}) => {
     }
   }
 
-  // Filter by availability
   if (availability === "available") {
     filter.quantity = { $gt: 0 };
   } else if (availability === "unavailable") {
     filter.quantity = 0;
   }
 
-  // Sorting
   let sortOption = { createdAt: -1 };
 
   if (sort === "price-low") {
@@ -88,34 +82,34 @@ export const getAllEquipment = async (query = {}) => {
     sortOption = { createdAt: -1 };
   }
 
-  const equipment = await equipmentCollection
-    .find(filter)
-    .sort(sortOption)
-    .toArray();
+  let equipmentQuery = equipmentCollection.find(filter).sort(sortOption);
 
-  return equipment;
+  if (limit !== undefined) {
+    const parsedLimit = Math.max(1, Math.min(Number(limit) || 6, 100));
+    equipmentQuery = equipmentQuery.limit(parsedLimit);
+  }
+
+  return await equipmentQuery.toArray();
 };
 
-// Get single equipment by ID
+// Get single approved equipment by ID
 export const getEquipmentById = async (id) => {
   const equipmentCollection = getDB().collection("equipment");
 
-  const equipment = await equipmentCollection.findOne({
+  return await equipmentCollection.findOne({
     _id: new ObjectId(id),
     status: "approved",
   });
-
-  return equipment;
 };
 
 // Update equipment
 export const updateEquipment = async (id, ownerId, equipmentData) => {
   const equipmentCollection = getDB().collection("equipment");
 
-  const result = await equipmentCollection.updateOne(
+  return await equipmentCollection.updateOne(
     {
       _id: new ObjectId(id),
-      ownerId: ownerId,
+      ownerId,
     },
     {
       $set: {
@@ -124,18 +118,24 @@ export const updateEquipment = async (id, ownerId, equipmentData) => {
       },
     },
   );
-
-  return result;
 };
 
 // Delete equipment
 export const deleteEquipment = async (id, ownerId) => {
   const equipmentCollection = getDB().collection("equipment");
 
-  const result = await equipmentCollection.deleteOne({
+  return await equipmentCollection.deleteOne({
     _id: new ObjectId(id),
-    ownerId: ownerId,
+    ownerId,
   });
+};
 
-  return result;
+// Get all equipment belonging to the logged-in owner
+export const getMyEquipment = async (ownerId) => {
+  const equipmentCollection = getDB().collection("equipment");
+
+  return await equipmentCollection
+    .find({ ownerId })
+    .sort({ createdAt: -1 })
+    .toArray();
 };
