@@ -7,9 +7,16 @@ export const createCheckoutSession = async (booking) => {
   const checkoutCollection = getDB().collection("checkout_sessions");
 
   const checkoutId = new ObjectId();
-  const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 60 * 60 * 1000);
 
-  // Step-1: Save temporary checkout data
+  // Convert BDT to USD and calculate the exact Stripe amount in cents.
+  const amountInCents = Math.round(Number(booking.totalAmount) * 0.00804 * 100);
+
+  if (!Number.isInteger(amountInCents) || amountInCents < 50) {
+    throw new Error("The rental amount is too low for Stripe Checkout.");
+  }
+
   const checkoutData = {
     _id: checkoutId,
     ...booking,
@@ -17,17 +24,15 @@ export const createCheckoutSession = async (booking) => {
     paymentStatus: "unpaid",
     stripeSessionId: null,
     expiresAt,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    createdAt: now,
+    updatedAt: now,
   };
 
+  // Step 1: Save temporary checkout data.
   await checkoutCollection.insertOne(checkoutData);
 
   try {
-    // Step-2: Convert BDT to USD for test payment
-    const amountInUSD = booking.totalAmount * 0.00804;
-
-    // Step-3: Create Stripe Checkout Session
+    // Step 2: Create Stripe Checkout Session.
     const stripeSession = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
@@ -42,7 +47,7 @@ export const createCheckoutSession = async (booking) => {
               name: booking.equipmentName,
               description: `Rental for ${booking.rentalDuration} ${booking.rentalType} period(s)`,
             },
-            unit_amount: Math.round(amountInUSD * 100),
+            unit_amount: amountInCents,
           },
           quantity: 1,
         },
@@ -50,14 +55,18 @@ export const createCheckoutSession = async (booking) => {
 
       metadata: {
         checkoutId: checkoutId.toString(),
-        renterId: booking.renterId,
+        renterId: String(booking.renterId),
       },
 
       success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.CLIENT_URL}/payment/cancel`,
     });
 
-    // Step-4: Update checkout record
+    if (!stripeSession.url) {
+      throw new Error("Stripe Checkout URL was not generated.");
+    }
+
+    // Step 3: Update checkout record with Stripe session ID.
     await checkoutCollection.updateOne(
       { _id: checkoutId },
       {
@@ -86,13 +95,19 @@ export const completeCheckoutSession = async (stripeSession) => {
   const checkoutCollection = db.collection("checkout_sessions");
   const bookingsCollection = db.collection("bookings");
   const paymentsCollection = db.collection("payments");
+  const equipmentCollection = db.collection("equipment");
 
-  // Step-1: Verify successful payment
-  if (stripeSession.payment_status !== "paid") {
-    throw new Error("Payment is not completed.");
+  // Step 1: Verify successful Stripe payment.
+  if (
+    stripeSession.payment_status !== "paid" ||
+    !stripeSession.id ||
+    !stripeSession.metadata?.checkoutId ||
+    !stripeSession.metadata?.renterId
+  ) {
+    throw new Error("Invalid or incomplete Stripe payment.");
   }
 
-  const checkoutId = stripeSession.metadata?.checkoutId;
+  const checkoutId = stripeSession.metadata.checkoutId;
 
   if (!ObjectId.isValid(checkoutId)) {
     throw new Error("Invalid checkout ID.");
@@ -103,9 +118,9 @@ export const completeCheckoutSession = async (stripeSession) => {
   try {
     let result;
 
-    // Step-2: Start MongoDB transaction
+    // Step 2: Start MongoDB transaction.
     await mongoSession.withTransaction(async () => {
-      // Check duplicate payment
+      // Prevent duplicate booking if Stripe sends the webhook again.
       const existingPayment = await paymentsCollection.findOne(
         { stripeSessionId: stripeSession.id },
         { session: mongoSession },
@@ -116,10 +131,11 @@ export const completeCheckoutSession = async (stripeSession) => {
           alreadyProcessed: true,
           bookingId: existingPayment.bookingId,
         };
+
         return;
       }
 
-      // Find temporary checkout record
+      // Step 3: Find the temporary checkout record.
       const checkout = await checkoutCollection.findOne(
         {
           _id: new ObjectId(checkoutId),
@@ -135,8 +151,10 @@ export const completeCheckoutSession = async (stripeSession) => {
         throw new Error("Checkout record not found or already processed.");
       }
 
-      // Verify Stripe amount and currency
-      const expectedAmount = Math.round(checkout.totalAmount * 0.00804 * 100);
+      // Step 4: Verify Stripe amount and currency.
+      const expectedAmount = Math.round(
+        Number(checkout.totalAmount) * 0.00804 * 100,
+      );
 
       if (
         stripeSession.currency !== "usd" ||
@@ -145,42 +163,52 @@ export const completeCheckoutSession = async (stripeSession) => {
         throw new Error("Stripe payment amount verification failed.");
       }
 
-      // Check equipment availability again
-      const existingBookings = await bookingsCollection
-        .find(
-          {
-            equipmentId: checkout.equipmentId,
-            status: "confirmed",
-            startDate: { $lt: checkout.endDate },
-            endDate: { $gt: checkout.startDate },
-          },
-          { session: mongoSession },
-        )
-        .toArray();
-
-      const bookedQuantity = existingBookings.reduce(
-        (total, booking) => total + booking.quantity,
-        0,
+      // Step 5: Check equipment availability again.
+      const equipment = await equipmentCollection.findOne(
+        {
+          _id: checkout.equipmentId,
+          status: "approved",
+        },
+        { session: mongoSession },
       );
 
-      const equipment = await db
-        .collection("equipment")
-        .findOne({ _id: checkout.equipmentId }, { session: mongoSession });
+      let availableQuantity = 0;
 
-      const availableQuantity = equipment
-        ? equipment.quantity - bookedQuantity
-        : 0;
+      if (equipment) {
+        const existingBookings = await bookingsCollection
+          .find(
+            {
+              equipmentId: checkout.equipmentId,
+              status: "confirmed",
+              startDate: { $lt: checkout.endDate },
+              endDate: { $gt: checkout.startDate },
+            },
+            { session: mongoSession },
+          )
+          .toArray();
 
-      // Step-3: Prepare booking record
+        const bookedQuantity = existingBookings.reduce(
+          (total, booking) => total + Number(booking.quantity || 0),
+          0,
+        );
+
+        availableQuantity = Math.max(equipment.quantity - bookedQuantity, 0);
+      }
+
+      // A successful payment is never discarded.
+      // If availability changed, save it for admin review.
+      const bookingStatus =
+        equipment && checkout.quantity <= availableQuantity
+          ? "confirmed"
+          : "payment_review";
+
       const bookingId = new ObjectId();
       const now = new Date();
 
-      const bookingStatus =
-        checkout.quantity <= availableQuantity ? "confirmed" : "payment_review";
-
+      // Step 6: Create the booking record.
       const bookingData = {
-        _id: bookingId,
         ...checkout,
+        _id: bookingId,
         checkoutId: checkout._id,
         status: bookingStatus,
         paymentStatus: "paid",
@@ -189,24 +217,13 @@ export const completeCheckoutSession = async (stripeSession) => {
         updatedAt: now,
       };
 
-      delete bookingData._id;
       delete bookingData.expiresAt;
-      delete bookingData.stripeSessionId;
 
-      bookingData._id = bookingId;
-      bookingData.checkoutId = checkout._id;
-      bookingData.status = bookingStatus;
-      bookingData.paymentStatus = "paid";
-      bookingData.stripeSessionId = stripeSession.id;
-      bookingData.createdAt = now;
-      bookingData.updatedAt = now;
-
-      // Step-4: Save booking
       await bookingsCollection.insertOne(bookingData, {
         session: mongoSession,
       });
 
-      // Step-5: Save payment transaction
+      // Step 7: Save payment transaction.
       await paymentsCollection.insertOne(
         {
           bookingId,
@@ -223,9 +240,12 @@ export const completeCheckoutSession = async (stripeSession) => {
         { session: mongoSession },
       );
 
-      // Step-6: Update checkout status
+      // Step 8: Update checkout status.
       await checkoutCollection.updateOne(
-        { _id: checkout._id, status: "pending" },
+        {
+          _id: checkout._id,
+          status: "pending",
+        },
         {
           $set: {
             status:

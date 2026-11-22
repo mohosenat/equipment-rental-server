@@ -16,11 +16,41 @@ export const createBooking = async (bookingData, user) => {
     notes,
   } = bookingData;
 
+  // Step 1: Validate equipment ID.
   if (!ObjectId.isValid(equipmentId)) {
     throw new Error("Invalid equipment ID.");
   }
 
-  // Find approved equipment
+  // Step 2: Validate dates.
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+
+  if (
+    Number.isNaN(start.getTime()) ||
+    Number.isNaN(end.getTime()) ||
+    start <= new Date() ||
+    end <= start
+  ) {
+    throw new Error("Please select valid future rental dates.");
+  }
+
+  // Normalize dates to UTC ISO strings.
+  const normalizedStartDate = start.toISOString();
+  const normalizedEndDate = end.toISOString();
+
+  // Step 3: Validate quantity.
+  const rentalQuantity = Number(quantity);
+
+  if (!Number.isInteger(rentalQuantity) || rentalQuantity < 1) {
+    throw new Error("Please select a valid equipment quantity.");
+  }
+
+  // Step 4: Validate contact information.
+  if (!contactNumber?.trim() || !deliveryAddress?.trim()) {
+    throw new Error("Contact number and delivery address are required.");
+  }
+
+  // Step 5: Find approved equipment.
   const equipment = await equipmentCollection.findOne({
     _id: new ObjectId(equipmentId),
     status: "approved",
@@ -30,40 +60,49 @@ export const createBooking = async (bookingData, user) => {
     throw new Error("Equipment not found or not available.");
   }
 
-  // Check overlapping confirmed bookings
+  // Prevent booking your own equipment.
+  if (String(equipment.ownerId) === String(user.id)) {
+    throw new Error("You cannot book your own equipment.");
+  }
+
+  if (rentalQuantity > equipment.quantity) {
+    throw new Error(`Only ${equipment.quantity} equipment available.`);
+  }
+
+  // Step 6: Check overlapping confirmed bookings.
   const existingBookings = await bookingsCollection
     .find({
       equipmentId: equipment._id,
       status: "confirmed",
-      startDate: { $lt: endDate },
-      endDate: { $gt: startDate },
+      startDate: { $lt: normalizedEndDate },
+      endDate: { $gt: normalizedStartDate },
     })
     .toArray();
 
   const bookedQuantity = existingBookings.reduce(
-    (total, booking) => total + booking.quantity,
+    (total, booking) => total + Number(booking.quantity || 0),
     0,
   );
 
-  const availableQuantity = equipment.quantity - bookedQuantity;
+  const availableQuantity = Math.max(equipment.quantity - bookedQuantity, 0);
 
-  if (quantity > availableQuantity) {
+  if (rentalQuantity > availableQuantity) {
     throw new Error(
-      `Only ${Math.max(availableQuantity, 0)} equipment available.`,
+      `Only ${availableQuantity} equipment available for these dates.`,
     );
   }
 
-  // Calculate rental amount
+  // Step 7: Calculate rental amount.
   const rental = calculateRental(
-    startDate,
-    endDate,
+    normalizedStartDate,
+    normalizedEndDate,
     equipment.price,
     equipment.rentalType,
-    quantity,
+    rentalQuantity,
   );
 
-  // Prepare booking data for Stripe Checkout
-  // Booking will be saved after successful payment
+  // Step 8: Prepare booking data for Stripe Checkout.
+  // Booking will be saved after successful payment.
   return {
     equipmentId: equipment._id,
     equipmentName: equipment.name,
@@ -74,13 +113,13 @@ export const createBooking = async (bookingData, user) => {
     ownerId: equipment.ownerId,
     ownerEmail: equipment.ownerEmail,
 
-    startDate,
-    endDate,
-    quantity,
+    startDate: normalizedStartDate,
+    endDate: normalizedEndDate,
+    quantity: rentalQuantity,
 
-    contactNumber,
-    deliveryAddress,
-    notes,
+    contactNumber: contactNumber.trim(),
+    deliveryAddress: deliveryAddress.trim(),
+    notes: notes?.trim() || "",
 
     rentalDuration: rental.duration,
     rentalType: rental.rentalType,
@@ -93,9 +132,7 @@ export const getMyBookings = async (userId) => {
   const bookingsCollection = getDB().collection("bookings");
 
   const bookings = await bookingsCollection
-    .find({
-      renterId: userId,
-    })
+    .find({ renterId: userId })
     .sort({ createdAt: -1 })
     .toArray();
 
@@ -121,7 +158,8 @@ export const getBookingById = async (bookingId, userId) => {
   return booking;
 };
 
-// Cancel Booking
+// Cancellation request only.
+// No automatic cancellation or refund.
 export const cancelBooking = async (bookingId, userId) => {
   if (!ObjectId.isValid(bookingId)) {
     throw new Error("Invalid booking ID.");
@@ -142,6 +180,10 @@ export const cancelBooking = async (bookingId, userId) => {
     throw new Error("Booking is already cancelled.");
   }
 
+  if (booking.status === "in_progress" || booking.status === "completed") {
+    throw new Error("This booking cannot be cancelled.");
+  }
+
   if (booking.status !== "confirmed") {
     throw new Error("Only confirmed bookings can request cancellation.");
   }
@@ -152,10 +194,6 @@ export const cancelBooking = async (bookingId, userId) => {
 
   if (booking.cancellationStatus === "requested") {
     throw new Error("Cancellation request already submitted.");
-  }
-
-  if (booking.status === "in_progress" || booking.status === "completed") {
-    throw new Error("This booking cannot be cancelled.");
   }
 
   const result = await bookingCollection.updateOne(
