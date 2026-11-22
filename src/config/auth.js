@@ -12,7 +12,15 @@ export const createAuth = () => {
 
     baseURL: process.env.BETTER_AUTH_URL,
     secret: process.env.BETTER_AUTH_SECRET,
-    trustedOrigins: [process.env.CLIENT_URL],
+
+    trustedOrigins: [process.env.CLIENT_URL].filter(Boolean),
+
+    advanced: {
+      defaultCookieAttributes: {
+        sameSite: "none",
+        secure: true,
+      },
+    },
 
     emailAndPassword: {
       enabled: true,
@@ -30,13 +38,11 @@ export const createAuth = () => {
       },
     },
 
-    // Assign role securely during registration
     databaseHooks: {
       user: {
         create: {
           before: async (user, ctx) => {
             const requestedRole = ctx?.body?.role;
-
             const role = requestedRole === "owner" ? "owner" : "customer";
 
             return {
