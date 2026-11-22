@@ -121,32 +121,66 @@ export const getBookingById = async (bookingId, userId) => {
   return booking;
 };
 
+// Cancel Booking
 export const cancelBooking = async (bookingId, userId) => {
-  const bookingsCollection = getDB().collection("bookings");
-
   if (!ObjectId.isValid(bookingId)) {
     throw new Error("Invalid booking ID.");
   }
 
-  const result = await bookingsCollection.updateOne(
+  const bookingCollection = getDB().collection("bookings");
+
+  const booking = await bookingCollection.findOne({
+    _id: new ObjectId(bookingId),
+    renterId: userId,
+  });
+
+  if (!booking) {
+    throw new Error("Booking not found.");
+  }
+
+  if (booking.status === "cancelled") {
+    throw new Error("Booking is already cancelled.");
+  }
+
+  if (booking.status !== "confirmed") {
+    throw new Error("Only confirmed bookings can request cancellation.");
+  }
+
+  if (booking.paymentStatus !== "paid") {
+    throw new Error("Only paid bookings can request cancellation.");
+  }
+
+  if (booking.cancellationStatus === "requested") {
+    throw new Error("Cancellation request already submitted.");
+  }
+
+  if (booking.status === "in_progress" || booking.status === "completed") {
+    throw new Error("This booking cannot be cancelled.");
+  }
+
+  const result = await bookingCollection.updateOne(
     {
-      _id: new ObjectId(bookingId),
+      _id: booking._id,
       renterId: userId,
-      status: "pending_payment",
+      status: "confirmed",
+      paymentStatus: "paid",
+      cancellationStatus: { $ne: "requested" },
     },
     {
       $set: {
-        status: "cancelled",
+        cancellationStatus: "requested",
+        cancellationRequestedAt: new Date(),
         updatedAt: new Date(),
       },
     },
   );
 
-  if (result.matchedCount === 0) {
-    throw new Error("Booking not found or cannot be cancelled.");
+  if (result.modifiedCount === 0) {
+    throw new Error("Unable to submit cancellation request.");
   }
 
   return {
-    message: "Booking cancelled successfully.",
+    message:
+      "Cancellation request submitted successfully. It is waiting for admin review.",
   };
 };
