@@ -3,6 +3,8 @@ import cors from "cors";
 import { toNodeHandler } from "better-auth/node";
 
 import { verifyToken } from "./middlewares/auth.js";
+import { errorHandler } from "./middlewares/errorHandler.js";
+import { stripeWebhookController } from "./modules/payments/payments.controller.js";
 
 import apiRoutes from "./routes/index.js";
 
@@ -29,10 +31,18 @@ export const createApp = (auth) => {
   // Must be before express.json()
   app.all("/api/auth/*splat", toNodeHandler(auth));
 
-  // Body parser
-  app.use(express.json());
+  // Stripe Webhook
+  // Must be before express.json()
+  app.post(
+    "/api/payments/webhook",
+    express.raw({ type: "application/json" }),
+    stripeWebhookController,
+  );
 
-  //API routes
+  // Body parser
+  app.use(express.json({ limit: "15mb" }));
+
+  // API routes
   app.use("/api", apiRoutes);
 
   // Temporary authentication test route
@@ -43,6 +53,9 @@ export const createApp = (auth) => {
       user: req.user,
     });
   });
+
+  // Global Error Handler
+  app.use(errorHandler);
 
   return app;
 };
