@@ -35,7 +35,6 @@ export const createCheckoutSession = async (booking) => {
     // Step 2: Create Stripe Checkout Session.
     const stripeSession = await stripe.checkout.sessions.create({
       mode: "payment",
-      payment_method_types: ["card"],
       customer_email: booking.renterEmail,
       expires_at: Math.floor(expiresAt.getTime() / 1000),
 
@@ -269,4 +268,87 @@ export const completeCheckoutSession = async (stripeSession) => {
   } finally {
     await mongoSession.endSession();
   }
+};
+
+// Get Stripe Checkout Session Status
+export const getCheckoutSessionStatus = async (sessionId, renterId) => {
+  if (!sessionId || typeof sessionId !== "string") {
+    throw new Error("Invalid Stripe session ID.");
+  }
+
+  // Retrieve the session directly from Stripe
+  const stripeSession = await stripe.checkout.sessions.retrieve(sessionId);
+
+  if (!stripeSession || stripeSession.id !== sessionId) {
+    throw new Error("Payment session not found.");
+  }
+
+  // Ensure this session belongs to the logged-in renter
+  if (stripeSession.metadata?.renterId !== String(renterId)) {
+    const error = new Error("You are not authorized to access this payment.");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const db = getDB();
+
+  const checkout = await db.collection("checkout_sessions").findOne({
+    stripeSessionId: sessionId,
+    renterId: String(renterId),
+  });
+
+  if (!checkout) {
+    throw new Error("Checkout record not found.");
+  }
+
+  // Check whether the webhook has saved the payment
+  const payment = await db.collection("payments").findOne({
+    stripeSessionId: sessionId,
+    renterId: String(renterId),
+  });
+
+  // Stripe payment succeeded, but webhook may still be processing
+  if (stripeSession.payment_status === "paid" && !payment) {
+    return {
+      paymentStatus: "paid",
+      processingStatus: "processing",
+      message: "Payment received. Booking confirmation is being processed.",
+    };
+  }
+
+  // Payment and booking have both been saved
+  if (payment) {
+    const booking = await db.collection("bookings").findOne({
+      _id: payment.bookingId,
+      renterId: String(renterId),
+    });
+
+    return {
+      paymentStatus: payment.paymentStatus,
+      processingStatus: "completed",
+      booking: booking
+        ? {
+            id: booking._id.toString(),
+            status: booking.status,
+            equipmentName: booking.equipmentName,
+            totalAmount: booking.totalAmount,
+          }
+        : null,
+      payment: {
+        amount: payment.amount,
+        currency: payment.currency,
+        paymentStatus: payment.paymentStatus,
+      },
+    };
+  }
+
+  return {
+    paymentStatus: stripeSession.payment_status,
+    processingStatus:
+      stripeSession.status === "expired" ? "expired" : "pending",
+    message:
+      stripeSession.status === "expired"
+        ? "This checkout session has expired."
+        : "Payment has not been completed yet.",
+  };
 };

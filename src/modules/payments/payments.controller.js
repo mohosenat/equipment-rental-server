@@ -3,6 +3,7 @@ import { validateBooking } from "../bookings/bookings.validation.js";
 import {
   createCheckoutSession,
   completeCheckoutSession,
+  getCheckoutSessionStatus,
 } from "./payments.service.js";
 import stripe from "../../config/stripe.js";
 
@@ -87,6 +88,28 @@ export const stripeWebhookController = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Unable to process Stripe webhook.",
+    });
+  }
+};
+
+// Get Checkout Session Status
+export const getCheckoutSessionStatusController = async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    const result = await getCheckoutSessionStatus(sessionId, req.user.id);
+
+    return res.status(200).json({
+      success: true,
+      message: "Payment status retrieved successfully.",
+      data: result,
+    });
+  } catch (error) {
+    console.error("Payment Status Error:", error);
+
+    return res.status(error.statusCode || 400).json({
+      success: false,
+      message: error.message || "Unable to verify payment status.",
     });
   }
 };
